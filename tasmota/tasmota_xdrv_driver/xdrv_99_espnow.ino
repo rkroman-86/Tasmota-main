@@ -1,18 +1,7 @@
 /*
   xdrv_99_espnow.ino - ESP-NOW broadcast send/receive for Tasmota (ESP32)
-
-  Minimal transport layer using QuickEspNow (same lib as wizmote).
-  - broadcast send (raw bytes via EspNowMeshSend <hex>)
-  - receive → JSON event → Berry rules
-
+  Uses QuickEspNow library (same as wizmote driver).
   Enable with: #define USE_ESPNOW in user_config_override.h
-
-  Berry usage:
-    tasmota.add_rule("EspNow#data", def(val, trig, msg)
-      print("src:", msg["src"], "data:", msg["data"])
-    end)
-    tasmota.cmd("EspNowMeshInit")
-    tasmota.cmd("EspNowMeshSend 48656C6C6F")
 */
 
 #ifdef USE_ESPNOW
@@ -21,39 +10,75 @@
 #include "QuickEspNow.h"
 
 #define XDRV_99_ESPNOW  99
-#define XDRV_99  99
+#define XDRV_99         99
+
+#define ENMESH_QUEUE_SIZE     8
+#define ENMESH_MAX_PAYLOAD    250
+
+struct enmesh_packet_t {
+  uint8_t  src[6];
+  uint8_t  data[ENMESH_MAX_PAYLOAD];
+  uint8_t  len;
+  int8_t   rssi;
+};
 
 struct {
-  bool initialized;
+  enmesh_packet_t queue[ENMESH_QUEUE_SIZE];
+  uint8_t  q_head;
+  uint8_t  q_tail;
+  uint8_t  q_count;
+  bool     initialized;
 } EspNowMeshData;
 
 /*********************************************************************************************\
- * Receive callback — appelé par QuickEspNow depuis sa tâche RX
+ * Callback RX — tâche FreeRTOS QuickEspNow → push queue seulement
 \*********************************************************************************************/
 
 void EspNowMeshDataReceived(uint8_t* mac, uint8_t* data, uint8_t len, signed int rssi, bool broadcast) {
   if (!EspNowMeshData.initialized) { return; }
-  if (!mac || !data || len == 0) { return; }
+  if (!mac || !data || len == 0 || len > ENMESH_MAX_PAYLOAD) { return; }
+  if (EspNowMeshData.q_count >= ENMESH_QUEUE_SIZE) { return; } // drop si plein
 
-  // Convertir MAC en hex string
-  char src_hex[13];
-  snprintf(src_hex, sizeof(src_hex), "%02X%02X%02X%02X%02X%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  enmesh_packet_t *slot = &EspNowMeshData.queue[EspNowMeshData.q_head];
+  memcpy(slot->src,  mac,  6);
+  memcpy(slot->data, data, len);
+  slot->len  = len;
+  slot->rssi = (int8_t)rssi;
 
-  // Convertir data en hex string
-  char data_hex[ESPNOW_MAX_MESSAGE_LENGTH * 2 + 1];
-  for (uint8_t i = 0; i < len && i < ESPNOW_MAX_MESSAGE_LENGTH; i++) {
-    snprintf(data_hex + i * 2, 3, "%02X", data[i]);
+  EspNowMeshData.q_head = (EspNowMeshData.q_head + 1) % ENMESH_QUEUE_SIZE;
+  EspNowMeshData.q_count++;
+}
+
+/*********************************************************************************************\
+ * Traitement queue — appelé depuis FUNC_LOOP (contexte Tasmota main loop)
+\*********************************************************************************************/
+
+void EspNowMeshProcessQueue(void) {
+  while (EspNowMeshData.q_count > 0) {
+    enmesh_packet_t *pkt = &EspNowMeshData.queue[EspNowMeshData.q_tail];
+
+    char src_hex[13];
+    snprintf(src_hex, sizeof(src_hex), "%02X%02X%02X%02X%02X%02X",
+             pkt->src[0], pkt->src[1], pkt->src[2],
+             pkt->src[3], pkt->src[4], pkt->src[5]);
+
+    char data_hex[ENMESH_MAX_PAYLOAD * 2 + 1];
+    for (uint8_t i = 0; i < pkt->len; i++) {
+      snprintf(data_hex + i * 2, 3, "%02X", pkt->data[i]);
+    }
+    data_hex[pkt->len * 2] = '\0';
+
+    AddLog(LOG_LEVEL_DEBUG, PSTR("ENW: Rcvd %d bytes from %s RSSI %d"),
+           pkt->len, src_hex, pkt->rssi);
+
+    // Déclencher les règles Berry depuis le main loop — thread-safe
+    Response_P(PSTR("{\"EspNow\":{\"src\":\"%s\",\"data\":\"%s\",\"rssi\":%d}}"),
+               src_hex, data_hex, pkt->rssi);
+    XdrvRulesProcess(0);
+
+    EspNowMeshData.q_tail  = (EspNowMeshData.q_tail + 1) % ENMESH_QUEUE_SIZE;
+    EspNowMeshData.q_count--;
   }
-  data_hex[len * 2] = '\0';
-
-  AddLog(LOG_LEVEL_DEBUG, PSTR("ENW: Rcvd %d bytes from %s RSSI %d"), len, src_hex, rssi);
-
-  // Générer l'event JSON pour Berry rules
-  // {"EspNow":{"src":"AABBCCDDEEFF","data":"48656C6C6F","rssi":-65}}
-  Response_P(PSTR("{\"EspNow\":{\"src\":\"%s\",\"data\":\"%s\",\"rssi\":%d}}"),
-             src_hex, data_hex, rssi);
-  XdrvRulesProcess(0);
 }
 
 /*********************************************************************************************\
@@ -65,7 +90,6 @@ void EspNowMeshInit(void) {
     AddLog(LOG_LEVEL_INFO, PSTR("ENW: Already initialized"));
     return;
   }
-
   if (quickEspNow.begin()) {
     quickEspNow.onDataRcvd(EspNowMeshDataReceived);
     EspNowMeshData.initialized = true;
@@ -76,17 +100,14 @@ void EspNowMeshInit(void) {
 }
 
 /*********************************************************************************************\
- * Commandes Tasmota
+ * Commandes
 \*********************************************************************************************/
 
-// EspNowMeshInit
 void CmndEspNowMeshInit(void) {
   EspNowMeshInit();
   ResponseCmndChar(EspNowMeshData.initialized ? "OK" : "Failed");
 }
 
-// EspNowMeshSend <hex>
-// Exemple: EspNowMeshSend 48656C6C6F  → envoie "Hello" en broadcast
 void CmndEspNowMeshSend(void) {
   if (!EspNowMeshData.initialized) {
     ResponseCmndChar("Not initialized");
@@ -97,10 +118,9 @@ void CmndEspNowMeshSend(void) {
     return;
   }
 
-  // Décoder hex → bytes
-  uint8_t buf[ESPNOW_MAX_MESSAGE_LENGTH];
+  uint8_t buf[ENMESH_MAX_PAYLOAD];
   uint32_t hex_len = XdrvMailbox.data_len;
-  if (hex_len > ESPNOW_MAX_MESSAGE_LENGTH * 2) { hex_len = ESPNOW_MAX_MESSAGE_LENGTH * 2; }
+  if (hex_len > ENMESH_MAX_PAYLOAD * 2) { hex_len = ENMESH_MAX_PAYLOAD * 2; }
 
   auto hexNibble = [](char c) -> uint8_t {
     if (c >= '0' && c <= '9') return c - '0';
@@ -147,6 +167,11 @@ bool Xdrv99(uint32_t function) {
       break;
     case FUNC_COMMAND:
       result = DecodeCommand(kEspNowMeshCommands, EspNowMeshCommand);
+      break;
+    case FUNC_LOOP:
+      if (EspNowMeshData.initialized && EspNowMeshData.q_count > 0) {
+        EspNowMeshProcessQueue();
+      }
       break;
   }
   return result;
