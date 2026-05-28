@@ -21,6 +21,7 @@
 #include "QuickEspNow.h"
 
 #define XDRV_99_ESPNOW  99
+#define XDRV_99  99
 
 struct {
   bool initialized;
