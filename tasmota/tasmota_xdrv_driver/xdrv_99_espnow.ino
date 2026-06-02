@@ -2,6 +2,9 @@
   xdrv_99_espnow.ino - ESP-NOW broadcast send/receive for Tasmota (ESP32)
   Uses QuickEspNow library (same as wizmote driver).
   Enable with: #define USE_ESPNOW in user_config_override.h
+
+  Canal fixe 13 — indépendant du Wi-Fi.
+  Init automatique au boot via FUNC_INIT.
 */
 
 #ifdef USE_ESPNOW
@@ -9,11 +12,12 @@
 
 #include "QuickEspNow.h"
 
-#define XDRV_99_ESPNOW  99
-#define XDRV_99         99
+#define XDRV_99_ESPNOW    99
+#define XDRV_99           99
 
-#define ENMESH_QUEUE_SIZE     8
-#define ENMESH_MAX_PAYLOAD    250
+#define ENMESH_CHANNEL    13   // Canal fixe ESP-NOW — doit correspondre à l'AP fourni
+#define ENMESH_QUEUE_SIZE  8
+#define ENMESH_MAX_PAYLOAD 250
 
 struct enmesh_packet_t {
   uint8_t  src[6];
@@ -31,7 +35,7 @@ struct {
 } EspNowMeshData;
 
 /*********************************************************************************************\
- * Callback RX — tâche FreeRTOS QuickEspNow → push queue seulement
+ * Callback RX — tâche FreeRTOS QuickEspNow → push queue seulement, pas d'appels Tasmota ici
 \*********************************************************************************************/
 
 void EspNowMeshDataReceived(uint8_t* mac, uint8_t* data, uint8_t len, signed int rssi, bool broadcast) {
@@ -50,7 +54,7 @@ void EspNowMeshDataReceived(uint8_t* mac, uint8_t* data, uint8_t len, signed int
 }
 
 /*********************************************************************************************\
- * Traitement queue — appelé depuis FUNC_LOOP (contexte Tasmota main loop)
+ * Traitement queue — appelé depuis FUNC_LOOP (contexte Tasmota main loop, thread-safe)
 \*********************************************************************************************/
 
 void EspNowMeshProcessQueue(void) {
@@ -71,7 +75,6 @@ void EspNowMeshProcessQueue(void) {
     AddLog(LOG_LEVEL_DEBUG, PSTR("ENW: Rcvd %d bytes from %s RSSI %d"),
            pkt->len, src_hex, pkt->rssi);
 
-    // Déclencher les règles Berry depuis le main loop — thread-safe
     Response_P(PSTR("{\"EspNow\":{\"src\":\"%s\",\"data\":\"%s\",\"rssi\":%d}}"),
                src_hex, data_hex, pkt->rssi);
     XdrvRulesProcess(0);
@@ -82,7 +85,7 @@ void EspNowMeshProcessQueue(void) {
 }
 
 /*********************************************************************************************\
- * Init
+ * Init — canal fixe 13, indépendant du Wi-Fi
 \*********************************************************************************************/
 
 void EspNowMeshInit(void) {
@@ -90,12 +93,12 @@ void EspNowMeshInit(void) {
     AddLog(LOG_LEVEL_INFO, PSTR("ENW: Already initialized"));
     return;
   }
-  if (quickEspNow.begin()) {
+  if (quickEspNow.begin(ENMESH_CHANNEL)) {
     quickEspNow.onDataRcvd(EspNowMeshDataReceived);
     EspNowMeshData.initialized = true;
-    AddLog(LOG_LEVEL_INFO, PSTR("ENW: Started on channel %d"), WiFi.channel());
+    AddLog(LOG_LEVEL_INFO, PSTR("ENW: Started on channel %d"), ENMESH_CHANNEL);
   } else {
-    AddLog(LOG_LEVEL_ERROR, PSTR("ENW: begin() failed"));
+    AddLog(LOG_LEVEL_ERROR, PSTR("ENW: begin() failed on channel %d"), ENMESH_CHANNEL);
   }
 }
 
@@ -164,6 +167,10 @@ bool Xdrv99(uint32_t function) {
   switch (function) {
     case FUNC_PRE_INIT:
       memset(&EspNowMeshData, 0, sizeof(EspNowMeshData));
+      break;
+    case FUNC_INIT:
+      // Init automatique au boot — sans attendre le Wi-Fi
+      EspNowMeshInit();
       break;
     case FUNC_COMMAND:
       result = DecodeCommand(kEspNowMeshCommands, EspNowMeshCommand);
