@@ -168,7 +168,7 @@ bool Xdrv99(uint32_t function) {
     case FUNC_PRE_INIT:
       memset(&EspNowMeshData, 0, sizeof(EspNowMeshData));
       break;
-    case FUNC_INIT:
+    case FUNC_EVERY_SECOND:
       // Init automatique au boot — sans attendre le Wi-Fi
       EspNowMeshInit();
       break;
