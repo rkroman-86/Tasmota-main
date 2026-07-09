@@ -1,5 +1,4 @@
 // xdrv_99_espnow.ino
-
 #ifdef USE_ESPNOW
 #ifdef ESP32
 
@@ -12,10 +11,11 @@ typedef struct {
   char cmd;
 } ESPNowPacket;
 
-// Forward declaration explicite du type si manquant
 #ifndef ESP_NOW_RECV_INFO_DEFINED
 typedef struct esp_now_recv_info esp_now_recv_info_t;
 #endif
+
+bool espnow_initialized = false;
 
 void ESPNow_OnReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
@@ -31,23 +31,29 @@ void ESPNow_OnReceive(const esp_now_recv_info_t *info, const uint8_t *data, int 
 
 void ESPNow_Init(void)
 {
+  if (espnow_initialized) return;
+  if (!WifiHasIP()) return;  // Attendre que le WiFi soit connecté
+
   uint8_t primary;
   wifi_second_chan_t second;
   esp_wifi_get_channel(&primary, &second);
+
   esp_now_deinit();
   if (esp_now_init() != ESP_OK) {
     AddLog(LOG_LEVEL_ERROR, PSTR("ESP-NOW: init failed"));
     return;
   }
+
   esp_now_register_recv_cb(ESPNow_OnReceive);
+  espnow_initialized = true;
   AddLog(LOG_LEVEL_INFO, PSTR("ESP-NOW: ready canal %d"), primary);
 }
 
 bool Xdrv99(uint32_t function)
 {
   switch (function) {
-    case FUNC_INIT:
-      ESPNow_Init();
+    case FUNC_EVERY_SECOND:
+      ESPNow_Init();  // Appelé chaque seconde jusqu'à init réussie
       break;
   }
   return false;
