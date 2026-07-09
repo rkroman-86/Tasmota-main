@@ -1,188 +1,57 @@
-/*
-  xdrv_99_espnow.ino - ESP-NOW broadcast send/receive for Tasmota (ESP32)
-  Uses QuickEspNow library (same as wizmote driver).
-  Enable with: #define USE_ESPNOW in user_config_override.h
-
-  Canal fixe 13 — indépendant du Wi-Fi.
-  Init automatique au boot via FUNC_INIT.
-*/
+// xdrv_99_espnow.ino
 
 #ifdef USE_ESPNOW
 #ifdef ESP32
 
-#include "QuickEspNow.h"
+#include <esp_now.h>
+#include <esp_wifi.h>
 
-#define XDRV_99_ESPNOW    99
-#define XDRV_99           99
+#define XDRV_99 99
 
-#define ENMESH_CHANNEL    13   // Canal fixe ESP-NOW — doit correspondre à l'AP fourni
-#define ENMESH_QUEUE_SIZE  8
-#define ENMESH_MAX_PAYLOAD 250
+typedef struct {
+  char cmd;
+} ESPNowPacket;
 
-struct enmesh_packet_t {
-  uint8_t  src[6];
-  uint8_t  data[ENMESH_MAX_PAYLOAD];
-  uint8_t  len;
-  int8_t   rssi;
-};
+// Forward declaration explicite du type si manquant
+#ifndef ESP_NOW_RECV_INFO_DEFINED
+typedef struct esp_now_recv_info esp_now_recv_info_t;
+#endif
 
-struct {
-  enmesh_packet_t queue[ENMESH_QUEUE_SIZE];
-  uint8_t  q_head;
-  uint8_t  q_tail;
-  uint8_t  q_count;
-  bool     initialized;
-} EspNowMeshData;
-
-/*********************************************************************************************\
- * Callback RX — tâche FreeRTOS QuickEspNow → push queue seulement, pas d'appels Tasmota ici
-\*********************************************************************************************/
-
-void EspNowMeshDataReceived(uint8_t* mac, uint8_t* data, uint8_t len, signed int rssi, bool broadcast) {
-  if (!EspNowMeshData.initialized) { return; }
-  if (!mac || !data || len == 0 || len > ENMESH_MAX_PAYLOAD) { return; }
-  if (EspNowMeshData.q_count >= ENMESH_QUEUE_SIZE) { return; } // drop si plein
-
-  enmesh_packet_t *slot = &EspNowMeshData.queue[EspNowMeshData.q_head];
-  memcpy(slot->src,  mac,  6);
-  memcpy(slot->data, data, len);
-  slot->len  = len;
-  slot->rssi = (int8_t)rssi;
-
-  EspNowMeshData.q_head = (EspNowMeshData.q_head + 1) % ENMESH_QUEUE_SIZE;
-  EspNowMeshData.q_count++;
+void ESPNow_OnReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len)
+{
+  if (len != sizeof(ESPNowPacket)) return;
+  ESPNowPacket pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  uint8_t *mac = info->src_addr;
+  AddLog(LOG_LEVEL_INFO, PSTR("ESP-NOW: '%c' de %02X:%02X:%02X:%02X:%02X:%02X"),
+    pkt.cmd, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+  Response_P(PSTR("{\"ESPNow\":{\"Cmd\":\"%c\"}}"), pkt.cmd);
+  MqttPublishPrefixTopicRulesProcess_P(RESULT_OR_TELE, PSTR("ESPNow"));
 }
 
-/*********************************************************************************************\
- * Traitement queue — appelé depuis FUNC_LOOP (contexte Tasmota main loop, thread-safe)
-\*********************************************************************************************/
-
-void EspNowMeshProcessQueue(void) {
-  while (EspNowMeshData.q_count > 0) {
-    enmesh_packet_t *pkt = &EspNowMeshData.queue[EspNowMeshData.q_tail];
-
-    char src_hex[13];
-    snprintf(src_hex, sizeof(src_hex), "%02X%02X%02X%02X%02X%02X",
-             pkt->src[0], pkt->src[1], pkt->src[2],
-             pkt->src[3], pkt->src[4], pkt->src[5]);
-
-    char data_hex[ENMESH_MAX_PAYLOAD * 2 + 1];
-    for (uint8_t i = 0; i < pkt->len; i++) {
-      snprintf(data_hex + i * 2, 3, "%02X", pkt->data[i]);
-    }
-    data_hex[pkt->len * 2] = '\0';
-
-    AddLog(LOG_LEVEL_DEBUG, PSTR("ENW: Rcvd %d bytes from %s RSSI %d"),
-           pkt->len, src_hex, pkt->rssi);
-
-    Response_P(PSTR("{\"EspNow\":{\"src\":\"%s\",\"data\":\"%s\",\"rssi\":%d}}"),
-               src_hex, data_hex, pkt->rssi);
-    XdrvRulesProcess(0);
-
-    EspNowMeshData.q_tail  = (EspNowMeshData.q_tail + 1) % ENMESH_QUEUE_SIZE;
-    EspNowMeshData.q_count--;
-  }
-}
-
-/*********************************************************************************************\
- * Init — canal fixe 13, indépendant du Wi-Fi
-\*********************************************************************************************/
-
-void EspNowMeshInit(void) {
-  if (EspNowMeshData.initialized) {
-    AddLog(LOG_LEVEL_INFO, PSTR("ENW: Already initialized"));
+void ESPNow_Init(void)
+{
+  uint8_t primary;
+  wifi_second_chan_t second;
+  esp_wifi_get_channel(&primary, &second);
+  esp_now_deinit();
+  if (esp_now_init() != ESP_OK) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("ESP-NOW: init failed"));
     return;
   }
-  if (quickEspNow.begin(ENMESH_CHANNEL)) {
-    quickEspNow.onDataRcvd(EspNowMeshDataReceived);
-    EspNowMeshData.initialized = true;
-    AddLog(LOG_LEVEL_INFO, PSTR("ENW: Started on channel %d"), ENMESH_CHANNEL);
-  } else {
-    AddLog(LOG_LEVEL_ERROR, PSTR("ENW: begin() failed on channel %d"), ENMESH_CHANNEL);
-  }
+  esp_now_register_recv_cb(ESPNow_OnReceive);
+  AddLog(LOG_LEVEL_INFO, PSTR("ESP-NOW: ready canal %d"), primary);
 }
 
-/*********************************************************************************************\
- * Commandes
-\*********************************************************************************************/
-
-void CmndEspNowMeshInit(void) {
-  EspNowMeshInit();
-  ResponseCmndChar(EspNowMeshData.initialized ? "OK" : "Failed");
-}
-
-void CmndEspNowMeshSend(void) {
-  if (!EspNowMeshData.initialized) {
-    ResponseCmndChar("Not initialized");
-    return;
-  }
-  if (XdrvMailbox.data_len < 2) {
-    ResponseCmndChar("Usage: EspNowMeshSend <hex>");
-    return;
-  }
-
-  uint8_t buf[ENMESH_MAX_PAYLOAD];
-  uint32_t hex_len = XdrvMailbox.data_len;
-  if (hex_len > ENMESH_MAX_PAYLOAD * 2) { hex_len = ENMESH_MAX_PAYLOAD * 2; }
-
-  auto hexNibble = [](char c) -> uint8_t {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return 0xFF;
-  };
-
-  uint32_t byte_len = 0;
-  const char* hex = XdrvMailbox.data;
-  for (uint32_t i = 0; i + 1 < hex_len; i += 2) {
-    uint8_t hi = hexNibble(hex[i]);
-    uint8_t lo = hexNibble(hex[i + 1]);
-    if (hi > 15 || lo > 15) { break; }
-    buf[byte_len++] = (hi << 4) | lo;
-  }
-
-  if (byte_len == 0) {
-    ResponseCmndChar("Invalid hex");
-    return;
-  }
-
-  comms_send_error_t err = quickEspNow.sendBcast(buf, byte_len);
-  ResponseCmndChar(err == COMMS_SEND_OK ? "Sent" : "Error");
-}
-
-/*********************************************************************************************\
- * Driver interface
-\*********************************************************************************************/
-
-const char kEspNowMeshCommands[] PROGMEM = "EspNowMesh|"
-  "Init|Send";
-
-void (* const EspNowMeshCommand[])(void) PROGMEM = {
-  &CmndEspNowMeshInit,
-  &CmndEspNowMeshSend
-};
-
-bool Xdrv99(uint32_t function) {
-  bool result = false;
+bool Xdrv99(uint32_t function)
+{
   switch (function) {
-    case FUNC_PRE_INIT:
-      memset(&EspNowMeshData, 0, sizeof(EspNowMeshData));
-      break;
-    case FUNC_EVERY_SECOND:
-      // Init automatique au boot — sans attendre le Wi-Fi
-      EspNowMeshInit();
-      break;
-    case FUNC_COMMAND:
-      result = DecodeCommand(kEspNowMeshCommands, EspNowMeshCommand);
-      break;
-    case FUNC_LOOP:
-      if (EspNowMeshData.initialized && EspNowMeshData.q_count > 0) {
-        EspNowMeshProcessQueue();
-      }
+    case FUNC_INIT:
+      ESPNow_Init();
       break;
   }
-  return result;
+  return false;
 }
 
-#endif  // ESP32
-#endif  // USE_ESPNOW
+#endif // ESP32
+#endif // USE_ESPNOW

@@ -90,6 +90,10 @@
 #endif  // USE_SDCARD
 #include "FFat.h"
 #include "FS.h"
+#ifdef USE_ESPNOW
+#include <esp_now.h>
+#include <esp_wifi.h>
+#endif  // USE_ESPNOW
 #endif  // ESP32
 #endif  // USE_UFILESYS
 

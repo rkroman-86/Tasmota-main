@@ -89,7 +89,10 @@ Examples :
 // !!! Remember that your changes GOES AT THE BOTTOM OF THIS FILE right before the last #endif !!!
 */
 
+#define USE_ESPNOW
 
+// Canal WiFi fixe — DOIT matcher WIFI_CH de l'émetteur
+#define WIFI_CHANNEL 6
 
 
 
