@@ -6,6 +6,7 @@
 #include <esp_wifi.h>
 
 #define XDRV_99 99
+#define ESPNOW_CHANNEL 6
 
 typedef struct {
   char cmd;
@@ -16,13 +17,8 @@ typedef struct esp_now_recv_info esp_now_recv_info_t;
 #endif
 
 bool espnow_initialized = false;
-
-// Adresse broadcast
 uint8_t espnow_broadcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
-// -------------------------------------------------------
-// Callback réception
-// -------------------------------------------------------
 void ESPNow_OnReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
   if (len != sizeof(ESPNowPacket)) return;
@@ -35,9 +31,6 @@ void ESPNow_OnReceive(const esp_now_recv_info_t *info, const uint8_t *data, int 
   MqttPublishPrefixTopicRulesProcess_P(RESULT_OR_TELE, PSTR("ESPNow"));
 }
 
-// -------------------------------------------------------
-// Commande console: ESPNowSend N  ou  ESPNowSend F
-// -------------------------------------------------------
 void ESPNow_Send(void)
 {
   if (!espnow_initialized) {
@@ -50,20 +43,19 @@ void ESPNow_Send(void)
   }
 
   ESPNowPacket pkt;
-  pkt.cmd = XdrvMailbox.data[0];  // Premier caractère: 'N' ou 'F'
+  pkt.cmd = XdrvMailbox.data[0];
 
-  // Ajouter le peer broadcast si pas déjà fait
   if (!esp_now_is_peer_exist(espnow_broadcast)) {
     esp_now_peer_info_t peer{};
     memcpy(peer.peer_addr, espnow_broadcast, 6);
-    peer.channel = 0;
+    peer.channel = ESPNOW_CHANNEL;
     peer.encrypt = false;
     esp_now_add_peer(&peer);
   }
 
   esp_err_t result = esp_now_send(espnow_broadcast, (uint8_t*)&pkt, sizeof(pkt));
   if (result == ESP_OK) {
-    AddLog(LOG_LEVEL_INFO, PSTR("ESP-NOW: envoye '%c' en broadcast"), pkt.cmd);
+    AddLog(LOG_LEVEL_INFO, PSTR("ESP-NOW: envoye '%c' canal %d"), pkt.cmd, ESPNOW_CHANNEL);
     Response_P(PSTR("{\"ESPNowSend\":\"OK\",\"Cmd\":\"%c\"}"), pkt.cmd);
   } else {
     AddLog(LOG_LEVEL_ERROR, PSTR("ESP-NOW: send error %d"), result);
@@ -71,17 +63,19 @@ void ESPNow_Send(void)
   }
 }
 
-// -------------------------------------------------------
-// Init — attend que le WiFi soit connecté
-// -------------------------------------------------------
 void ESPNow_Init(void)
 {
   if (espnow_initialized) return;
-  if (!WifiHasIP()) return;
 
-  uint8_t primary;
-  wifi_second_chan_t second;
-  esp_wifi_get_channel(&primary, &second);
+  // Attendre que le WiFi soit démarré (connecté OU en AP mode)
+  if (WifiHasIP() == false && WifiIsInManagerMode() == false) return;
+
+  // Forcer le canal après que le WiFi soit actif
+  esp_err_t ch_err = esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  if (ch_err != ESP_OK) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("ESP-NOW: set channel failed %d"), ch_err);
+    return;
+  }
 
   esp_now_deinit();
   if (esp_now_init() != ESP_OK) {
@@ -91,12 +85,9 @@ void ESPNow_Init(void)
 
   esp_now_register_recv_cb(ESPNow_OnReceive);
   espnow_initialized = true;
-  AddLog(LOG_LEVEL_INFO, PSTR("ESP-NOW: ready canal %d"), primary);
+  AddLog(LOG_LEVEL_INFO, PSTR("ESP-NOW: ready canal %d"), ESPNOW_CHANNEL);
 }
 
-// -------------------------------------------------------
-// Dispatcher Tasmota
-// -------------------------------------------------------
 const char kESPNowCommands[] PROGMEM = "|ESPNowSend";
 void (* const ESPNowCommand[])(void) PROGMEM = { &ESPNow_Send };
 
