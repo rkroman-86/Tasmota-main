@@ -496,8 +496,36 @@ int32_t TasmotaI2S::consumeSamples(int16_t *samples, size_t count) {
     }
 
     // apply gain
-    left = Amplify(left);
-    right = Amplify(right);
+
+    // RK modif
+    // --- Perceptual volume remap (replaces linear Amplify) ---
+    // The stock Amplify() applies a linear gain, which sounds like almost all the
+    // usable range is crammed into the top of the slider (the ear is roughly
+    // logarithmic). This remaps the control so low/mid slider positions get a much
+    // gentler gain, giving a smooth, natural-feeling taper.
+    //
+    // gainF2P6 is the Q6 gain control (0..64, where 64 == "full").
+    // Effective gain = gainF2P6 / divisor, with divisor shrinking as gainF2P6 rises:
+    //   gainF2P6 = 64  -> divisor = 128  -> gain = 0.50  (see note below)
+    //   gainF2P6 = 32  -> divisor = 1984 -> gain ~ 0.016
+    //   gainF2P6 = 8   -> divisor = 3376 -> gain ~ 0.0024
+    //
+    // NOTE: max effective gain is intentionally 0.5 (-6 dBFS), i.e. a deliberate
+    // head-room / anti-clipping margin ahead of the downstream class-D amp. This is
+    // by design, not a bug: raising the floor of `divisor` toward 64 would give unity
+    // (1.0) gain but remove that margin.
+    //
+    // Integer division truncates toward zero, so very small samples at low volume
+    // settings can round to 0. That is inaudible on music and keeps the hot path
+    // integer-only (no float per sample).
+    //left = Amplify(left);
+    //right = Amplify(right);
+    int32_t divisor = 3840 - ((3840 - 128) * (int32_t)gainF2P6 / 64);
+    int32_t vl = (int32_t)left  * gainF2P6 / divisor;
+    int32_t vr = (int32_t)right * gainF2P6 / divisor;
+    left  = (vl >  32767) ?  32767 : (vl < -32767) ? -32767 : (int16_t)vl;
+    right = (vr >  32767) ?  32767 : (vr < -32767) ? -32767 : (int16_t)vr;
+    // end RK modif
 
     if (isDACMode()) {
       ms[i*2 + LEFTCHANNEL] = left + 0x8000;
