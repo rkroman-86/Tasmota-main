@@ -716,6 +716,10 @@ void I2sStatusCallback(void *cbData, int code, const char *string) {
   AddLog(LOG_LEVEL_DEBUG, "I2S: -> %s", string);
 }
 
+// RK modif
+// Webradio / DLNA playback task.
+// Guarded by USE_I2S_MP3 because it is only built when file/stream playback is
+// compiled in (the mini webradio build defines USE_I2S_WEBRADIO which pulls it in).
 #ifdef USE_I2S_MP3
 void I2sMp3WrTask(void *arg){
   audio_i2s_mp3.task_running = true;
@@ -723,19 +727,35 @@ void I2sMp3WrTask(void *arg){
   while (audio_i2s_mp3.task_running) {
     if (audio_i2s_mp3.decoder && audio_i2s_mp3.decoder->isRunning()) {
       if (!audio_i2s_mp3.decoder->loop()) {
+        // decoder reached end of stream/track
         audio_i2s_mp3.task_running = false;
       }
-      vTaskDelay(pdMS_TO_TICKS(1));
+    } else {
+      // RK fix (loop -> next): upstream had no else here, so when the decoder
+      // stopped running while task_running was still true the loop spun forever,
+      // task_has_ended never became true, and the "Ended" event was never fired.
+      // For DLNA that meant the control point never learned the track had finished
+      // and the next track never started. Ending the task here lets I2sEventHandler
+      // publish {"Event":{"I2SPlay":"Ended"}} so the playlist advances.
+      audio_i2s_mp3.task_running = false;
     }
+    // RK fix: single vTaskDelay outside the if/else so every iteration yields
+    // (previously the delay lived inside the if and the else path could spin).
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
   audio_i2s.out->flush();
+  // RK fix (memory/socket leak): this is the webradio/DLNA task, whose source is
+  // Audio_webradio.ifile (an AudioFileSourceICYStream holding the HTTP socket).
+  // mp3_delete() only frees audio_i2s_mp3.file/id3/buff/decoder and leaves ifile
+  // dangling, so every DLNA track change leaked one ICY stream + socket until RAM
+  // ran out. I2sWebRadioStopPlaying() frees decoder, buff AND ifile.
   I2sWebRadioStopPlaying();
   audio_i2s_mp3.mp3_task_handle = nullptr;
   audio_i2s_mp3.task_has_ended = true;
   vTaskDelete(NULL);
 }
-
 #endif // USE_I2S_MP3
+// end RK modif
 
 void I2sStopPlaying() {
   I2SAudioPower(false);
